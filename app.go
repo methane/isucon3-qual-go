@@ -2,8 +2,10 @@ package main
 
 import (
 	"./sessions"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
@@ -29,7 +31,6 @@ const (
 	tmpDir          = "/tmp/"
 	markdownCommand = "../bin/markdown"
 	memcachedServer = "localhost:11211"
-	sessionSecret   = "kH<{11qpic*gf0e21YK7YtwyUvE9l<1r>yX8R-Op"
 )
 
 type Config struct {
@@ -44,7 +45,8 @@ type Config struct {
 
 type Session struct {
 	Token  string
-	UserId string
+	UserId int
+	Key    string
 }
 
 type SessionStore struct {
@@ -57,9 +59,14 @@ var sessionStore = SessionStore{
 	sync.Mutex{},
 }
 
-func (self SessionStore) Get(key string) *Session {
+func (self SessionStore) Get(r *http.Request) *Session {
+	cookie, _ := r.Cookie(sessionName)
+	if cookie == nil {
+		return &Session{}
+	}
 	self.lock.Lock()
 	defer self.lock.Unlock()
+	key := cookie.Value
 	s := self.store[key]
 	if s == nil {
 		s = &Session{}
@@ -67,7 +74,18 @@ func (self SessionStore) Get(key string) *Session {
 	return s
 }
 
-func (self SessionStore) Set(key string, sess *Session) {
+func (self SessionStore) Set(w http.ResponseWriter, sess *Session) {
+	key := sess.Key
+	if key == "" {
+		b := make([]byte, 8)
+		rand.Read(b)
+		key = hex.EncodeToString(b)
+		sess.Key = key
+	}
+
+	cookie := sessions.NewCookie(sessionName, key, &sessions.Options{})
+	http.SetCookie(w, cookie)
+
 	self.lock.Lock()
 	defer self.lock.Unlock()
 	self.store[key] = sess
@@ -103,7 +121,7 @@ type View struct {
 	Total     int
 	Older     *Memo
 	Newer     *Memo
-	Session   *sessions.Session
+	Session   *Session
 }
 
 var (
@@ -117,8 +135,8 @@ var (
 			sl := strings.Split(s, "\n")
 			return sl[0]
 		},
-		"get_token": func(session *sessions.Session) interface{} {
-			return session.Values["token"]
+		"get_token": func(session *Session) interface{} {
+			return session.Token
 		},
 		"gen_markdown": func(s string) template.HTML {
 			f, _ := ioutil.TempFile(tmpDir, "isucon")
@@ -198,18 +216,13 @@ func prepareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func loadSession(w http.ResponseWriter, r *http.Request) (session *sessions.Session, err error) {
-	store := sessions.NewMemcacheStore(memcachedServer, []byte(sessionSecret))
-	return store.Get(r, sessionName)
-}
-
-func getUser(w http.ResponseWriter, r *http.Request, session *sessions.Session) *User {
-	userId := session.Values["user_id"]
-	if userId == nil {
+func getUser(w http.ResponseWriter, r *http.Request, session *Session) *User {
+	userId := session.UserId
+	if userId == 0 {
 		return nil
 	}
 	user := &User{}
-	rows, err := DB.Query("SELECT * FROM users WHERE id=?", userId)
+	rows, err := DB.Query(fmt.Sprintf("SELECT * FROM users WHERE id=%d", userId))
 	if err != nil {
 		serverError(w, err)
 		return nil
@@ -224,8 +237,8 @@ func getUser(w http.ResponseWriter, r *http.Request, session *sessions.Session) 
 	return user
 }
 
-func antiCSRF(w http.ResponseWriter, r *http.Request, session *sessions.Session) bool {
-	if r.FormValue("sid") != session.Values["token"] {
+func antiCSRF(w http.ResponseWriter, r *http.Request, session *Session) bool {
+	if r.FormValue("sid") != session.Token {
 		code := http.StatusBadRequest
 		http.Error(w, http.StatusText(code), code)
 		return true
@@ -245,11 +258,8 @@ func notFound(w http.ResponseWriter) {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
+
 	prepareHandler(w, r)
 	user := getUser(w, r, session)
 
@@ -299,11 +309,7 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func recentHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	user := getUser(w, r, session)
 	vars := mux.Vars(r)
@@ -358,11 +364,7 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signinHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	user := getUser(w, r, session)
 
@@ -377,11 +379,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signinPostHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
 	username := r.FormValue("username")
@@ -400,12 +398,9 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 		h := sha256.New()
 		h.Write([]byte(user.Salt + password))
 		if user.Password == fmt.Sprintf("%x", h.Sum(nil)) {
-			session.Values["user_id"] = user.Id
-			session.Values["token"] = fmt.Sprintf("%x", securecookie.GenerateRandomKey(32))
-			if err := session.Save(r, w); err != nil {
-				serverError(w, err)
-				return
-			}
+			session.UserId = user.Id
+			session.Token = fmt.Sprintf("%x", securecookie.GenerateRandomKey(32))
+			sessionStore.Set(w, session)
 			if _, err := DB.Exec("UPDATE users SET last_access=now() WHERE id=?", user.Id); err != nil {
 				serverError(w, err)
 				return
@@ -425,11 +420,7 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signoutHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
 		return
@@ -440,11 +431,7 @@ func signoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func mypageHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
 	user := getUser(w, r, session)
@@ -474,11 +461,7 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func memoHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	vars := mux.Vars(r)
 	memoId := vars["memo_id"]
@@ -557,11 +540,7 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func memoPostHandler(w http.ResponseWriter, r *http.Request) {
-	session, err := loadSession(w, r)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
+	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
 		return
