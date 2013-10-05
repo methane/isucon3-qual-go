@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -144,6 +145,18 @@ var M = struct {
 	memos:           []*Memo{},
 	publicMemoCount: 0,
 	maxMemoId:       0,
+}
+
+func addMemo(memo *Memo) {
+	if len(M.memos) < memo.Id+1 {
+		t := make([]*Memo, memo.Id*2+5)
+		copy(t, M.memos)
+		M.memos = t
+	}
+	M.memos[memo.Id] = memo
+	if memo.Id > M.maxMemoId {
+		M.maxMemoId = memo.Id
+	}
 }
 
 var (
@@ -575,15 +588,25 @@ func memoPostHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		isPrivate = 0
 	}
+	now := time.Now().Format("2006-01-02 15:04:05")
 	result, err := DB.Exec(
-		"INSERT INTO memos (user, content, is_private, created_at) VALUES (?, ?, ?, now())",
-		user.Id, r.FormValue("content"), isPrivate,
-	)
+		"INSERT INTO memos (user, content, is_private, created_at) VALUES (?, ?, ?, ?)",
+		user.Id, r.FormValue("content"), isPrivate, now)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
 	newId, _ := result.LastInsertId()
+
+	addMemo(&Memo{
+		Id:        int(newId),
+		User:      user.Id,
+		Content:   r.FormValue("content"),
+		IsPrivate: isPrivate,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Username:  user.Username})
+
 	http.Redirect(w, r, fmt.Sprintf("/memo/%d", newId), http.StatusFound)
 }
 
@@ -607,12 +630,7 @@ func initialLoad() {
 		memo := &Memo{}
 		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
 		memo.Username = M.users[memo.User].Username
-		if memo.Id+1 >= len(M.memos) {
-			t := make([]*Memo, memo.Id*2+1)
-			copy(t, M.memos)
-			M.memos = t
-		}
-		M.memos[memo.Id] = memo
+		addMemo(memo)
 		if memo.IsPrivate != 0 {
 			pubcnt++
 		}
