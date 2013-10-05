@@ -153,6 +153,9 @@ func addMemo(memo *Memo) {
 		copy(t, M.memos)
 		M.memos = t
 	}
+	if M.memos[memo.Id] == nil && memo.IsPrivate == 0 {
+		M.publicMemoCount++
+	}
 	M.memos[memo.Id] = memo
 	if memo.Id > M.maxMemoId {
 		M.maxMemoId = memo.Id
@@ -289,6 +292,7 @@ func notFound(w http.ResponseWriter) {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
@@ -296,8 +300,6 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	defer M.lock.RUnlock()
 
 	user := getUser(w, r, session)
-
-	totalCount := M.publicMemoCount
 
 	memos := make(Memos, 0, memosPerPage)
 	i := M.maxMemoId
@@ -314,7 +316,7 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := &View{
-		Total:     totalCount,
+		Total:     M.publicMemoCount,
 		Page:      0,
 		PageStart: 1,
 		PageEnd:   memosPerPage,
@@ -340,18 +342,7 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	page, _ := strconv.Atoi(vars["page"])
 
-	rows, err := DB.Query("SELECT count(*) AS c FROM memos WHERE is_private=0")
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	var totalCount int
-	if rows.Next() {
-		rows.Scan(&totalCount)
-	}
-	rows.Close()
-
-	rows, err = DB.Query("SELECT * FROM memos WHERE is_private=0 ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", memosPerPage, memosPerPage*page)
+	rows, err := DB.Query("SELECT * FROM memos WHERE is_private=0 ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", memosPerPage, memosPerPage*page)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -375,7 +366,7 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := &View{
-		Total:     totalCount,
+		Total:     M.publicMemoCount,
 		Page:      page,
 		PageStart: memosPerPage*page + 1,
 		PageEnd:   memosPerPage * (page + 1),
@@ -390,6 +381,7 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signinHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("signin", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	user := getUser(w, r, session)
@@ -406,6 +398,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signinPostHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("signin post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
@@ -449,6 +442,7 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signoutHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("signout post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
@@ -460,8 +454,12 @@ func signoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func mypageHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("mypage", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
+
+	M.lock.RLock()
+	defer M.lock.RUnlock()
 
 	user := getUser(w, r, session)
 	if user == nil {
@@ -491,70 +489,57 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func memoHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("memo", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	vars := mux.Vars(r)
-	memoId := vars["memo_id"]
-	user := getUser(w, r, session)
+	var memoId int
+	fmt.Sscanf(vars["memo_id"], "%d", &memoId)
 
-	rows, err := DB.Query("SELECT id, user, content, is_private, created_at, updated_at FROM memos WHERE id=?", memoId)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	memo := &Memo{}
-	if rows.Next() {
-		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
-		rows.Close()
-	} else {
-		notFound(w)
-		return
-	}
+	M.lock.RLock()
+	defer M.lock.RUnlock()
+
+	user := getUser(w, r, session)
+	memo := M.memos[memoId]
+
 	if memo.IsPrivate == 1 {
 		if user == nil || user.Id != memo.User {
 			notFound(w)
 			return
 		}
 	}
-	rows, err = DB.Query("SELECT username FROM users WHERE id=?", memo.User)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	if rows.Next() {
-		rows.Scan(&memo.Username)
-		rows.Close()
-	}
 
-	var cond string
-	if user != nil && user.Id == memo.User {
-		cond = ""
-	} else {
-		cond = "AND is_private=0"
-	}
-	rows, err = DB.Query("SELECT id, content, is_private, created_at, updated_at FROM memos WHERE user=? "+cond+" ORDER BY created_at", memo.User)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	memos := make(Memos, 0)
-	for rows.Next() {
-		m := Memo{}
-		rows.Scan(&m.Id, &m.Content, &m.IsPrivate, &m.CreatedAt, &m.UpdatedAt)
-		memos = append(memos, &m)
-	}
-	rows.Close()
-	var older *Memo
-	var newer *Memo
-	for i, m := range memos {
-		if m.Id == memo.Id {
-			if i > 0 {
-				older = memos[i-1]
-			}
-			if i < len(memos)-1 {
-				newer = memos[i+1]
+	var older, newer *Memo
+	current := memo.Id - 1
+	for current > 0 {
+		m := M.memos[current]
+		current--
+
+		if m == nil || m.User != memo.User {
+			continue
+		}
+		if user == nil || user.Id != memo.User {
+			if m.IsPrivate != 0 {
+				continue
 			}
 		}
+		older = m
+		break
+	}
+	current = memo.Id + 1
+	for current+1 < len(M.memos) {
+		m := M.memos[current]
+		current++
+
+		if m == nil || m.User != memo.User {
+			continue
+		}
+		if user == nil || user.Id != memo.User {
+			if m.IsPrivate != 0 {
+				continue
+			}
+		}
+		newer = m
 	}
 
 	v := &View{
@@ -565,12 +550,13 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 		Session: session,
 		BaseUrl: baseUrl.String(),
 	}
-	if err = tmpl.ExecuteTemplate(w, "memo", v); err != nil {
+	if err := tmpl.ExecuteTemplate(w, "memo", v); err != nil {
 		serverError(w, err)
 	}
 }
 
 func memoPostHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("memo post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
@@ -623,7 +609,8 @@ func initialLoad() {
 	}
 	rows.Close()
 
-	pubcnt := 0
+	M.memos = []*Memo{}
+	M.publicMemoCount = 0
 	rows, err = DB.Query("SELECT id, user, content, is_private, created_at, updated_at FROM memos")
 	must(err)
 	for rows.Next() {
@@ -631,13 +618,9 @@ func initialLoad() {
 		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
 		memo.Username = M.users[memo.User].Username
 		addMemo(memo)
-		if memo.IsPrivate != 0 {
-			pubcnt++
-		}
 		if memo.Id > M.maxMemoId {
 			M.maxMemoId = memo.Id
 		}
 	}
 	rows.Close()
-	M.publicMemoCount = pubcnt
 }
