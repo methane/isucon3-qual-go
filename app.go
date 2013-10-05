@@ -41,6 +41,10 @@ func must(err error) {
 	}
 }
 
+func sql_escape(s string) string {
+	return strings.Replace(s, "'", "''", -1)
+}
+
 type Config struct {
 	Database struct {
 		Dbname   string `json:"dbname"`
@@ -115,6 +119,8 @@ type Memo struct {
 	CreatedAt string
 	UpdatedAt string
 	Username  string
+	markdown  template.HTML
+	mlock     sync.Mutex
 }
 
 type Memos []*Memo
@@ -173,25 +179,29 @@ var (
 		"get_token": func(session *Session) interface{} {
 			return session.Token
 		},
-		"gen_markdown": func(s string) template.HTML {
-			f, _ := ioutil.TempFile(tmpDir, "isucon")
-			defer f.Close()
-			f.WriteString(s)
-			f.Sync()
-			finfo, _ := f.Stat()
-			path := tmpDir + finfo.Name()
-			defer os.Remove(path)
-			cmd := exec.Command(markdownCommand, path)
-			out, err := cmd.Output()
-			if err != nil {
-				log.Printf("can't exec markdown command: %v", err)
-				return ""
-			}
-			return template.HTML(out)
-		},
 	}
 	tmpl = template.Must(template.New("tmpl").Funcs(fmap).ParseGlob("templates/*.html"))
 )
+
+func (memo *Memo) Markdown() template.HTML {
+	memo.mlock.Lock()
+	defer memo.mlock.Unlock()
+
+	if memo.markdown == template.HTML("") {
+		cmd := exec.Command(markdownCommand)
+		pipe, err := cmd.StdinPipe()
+		go func() {
+			io.WriteString(pipe, memo.Content)
+			pipe.Close()
+		}()
+		out, err := cmd.Output()
+		if err != nil {
+			log.Panic(err)
+		}
+		memo.markdown = template.HTML(out)
+	}
+	return memo.markdown
+}
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -205,7 +215,7 @@ func main() {
 	config := loadConfig("../config/" + env + ".json")
 	db := config.Database
 	connectionString := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8",
+		"%s:%s@tcp(%s:%d)/%s?charset=utf8&sql_mode=NO_BACKSLASH_ESCAPES",
 		db.Username, db.Password, db.Host, db.Port, db.Dbname,
 	)
 	log.Printf("db: %s", connectionString)
@@ -304,7 +314,7 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	memos := make(Memos, 0, memosPerPage)
 	i := M.maxMemoId
 	for len(memos) < memosPerPage {
-		if i < 0 {
+		if i <= 0 {
 			break
 		}
 		m := M.memos[i]
@@ -422,7 +432,7 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 			session.UserId = user.Id
 			session.Token = fmt.Sprintf("%x", securecookie.GenerateRandomKey(32))
 			sessionStore.Set(w, session)
-			if _, err := DB.Exec("UPDATE users SET last_access=now() WHERE id=?", user.Id); err != nil {
+			if _, err := DB.Exec(fmt.Sprintf("UPDATE users SET last_access=now() WHERE id=%d", user.Id)); err != nil {
 				serverError(w, err)
 				return
 			} else {
@@ -500,7 +510,15 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 	defer M.lock.RUnlock()
 
 	user := getUser(w, r, session)
+	if memoId >= len(M.memos) {
+		notFound(w)
+		return
+	}
 	memo := M.memos[memoId]
+	if memo == nil {
+		notFound(w)
+		return
+	}
 
 	if memo.IsPrivate == 1 {
 		if user == nil || user.Id != memo.User {
@@ -556,7 +574,7 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func memoPostHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("memo post", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("memo post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
@@ -576,22 +594,25 @@ func memoPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 	result, err := DB.Exec(
-		"INSERT INTO memos (user, content, is_private, created_at) VALUES (?, ?, ?, ?)",
-		user.Id, r.FormValue("content"), isPrivate, now)
+		fmt.Sprintf("INSERT INTO memos (user, content, is_private, created_at) VALUES (%d, '%s', %d, '%s')",
+			user.Id, sql_escape(r.FormValue("content")), isPrivate, now))
 	if err != nil {
 		serverError(w, err)
 		return
 	}
 	newId, _ := result.LastInsertId()
 
-	addMemo(&Memo{
+	M.lock.Lock()
+	memo := &Memo{
 		Id:        int(newId),
 		User:      user.Id,
 		Content:   r.FormValue("content"),
 		IsPrivate: isPrivate,
 		CreatedAt: now,
 		UpdatedAt: now,
-		Username:  user.Username})
+		Username:  user.Username}
+	addMemo(memo)
+	M.lock.Unlock()
 
 	http.Redirect(w, r, fmt.Sprintf("/memo/%d", newId), http.StatusFound)
 }
@@ -611,16 +632,15 @@ func initialLoad() {
 
 	M.memos = []*Memo{}
 	M.publicMemoCount = 0
+	M.maxMemoId = 0
 	rows, err = DB.Query("SELECT id, user, content, is_private, created_at, updated_at FROM memos")
 	must(err)
 	for rows.Next() {
 		memo := &Memo{}
 		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
 		memo.Username = M.users[memo.User].Username
+		log.Println("memo:", memo.Id)
 		addMemo(memo)
-		if memo.Id > M.maxMemoId {
-			M.maxMemoId = memo.Id
-		}
 	}
 	rows.Close()
 }
