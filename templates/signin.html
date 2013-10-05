@@ -2,7 +2,7 @@
 
 {{ template "base_top" . }}
 
-<form action="{{ url_for "/signin" }}" method="post">
+<form action="{{.BaseUrl}}/signin" method="post">
 username <input type="text" name="username" size="20">
 <br>
 password <input type="password" name="password" size="20">
