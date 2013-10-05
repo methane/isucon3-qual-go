@@ -11,6 +11,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
+	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -21,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 )
 
 const (
@@ -136,7 +136,7 @@ var (
 		"get_token": func(session *Session) interface{} {
 			return session.Token
 		},
-		"gen_markdown": func(s string) string {
+		"gen_markdown": func(s string) template.HTML {
 			f, _ := ioutil.TempFile(tmpDir, "isucon")
 			defer f.Close()
 			f.WriteString(s)
@@ -150,7 +150,7 @@ var (
 				log.Printf("can't exec markdown command: %v", err)
 				return ""
 			}
-			return string(out)
+			return template.HTML(out)
 		},
 	}
 	tmpl = template.Must(template.New("tmpl").Funcs(fmap).ParseGlob("templates/*.html"))
@@ -241,6 +241,7 @@ func getUser(w http.ResponseWriter, r *http.Request, session *Session) *User {
 
 func antiCSRF(w http.ResponseWriter, r *http.Request, session *Session) bool {
 	if r.FormValue("sid") != session.Token {
+		log.Println("CSRF ERROR", r.FormValue("sid"), session.Token)
 		code := http.StatusBadRequest
 		http.Error(w, http.StatusText(code), code)
 		return true
