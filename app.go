@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
 	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -32,6 +33,12 @@ const (
 	markdownCommand = "../bin/markdown"
 	memcachedServer = "localhost:11211"
 )
+
+func must(err error) {
+	if err != nil {
+		log.Panic(err)
+	}
+}
 
 type Config struct {
 	Database struct {
@@ -126,7 +133,17 @@ type View struct {
 }
 
 var M = struct {
-	users = make(map[int]*User)
+	lock            sync.RWMutex
+	users           map[int]*User
+	memos           []*Memo
+	publicMemoCount int
+	maxMemoId       int
+}{
+	lock:            sync.RWMutex{},
+	users:           make(map[int]*User, 100),
+	memos:           []*Memo{},
+	publicMemoCount: 0,
+	maxMemoId:       0,
 }
 
 var (
@@ -184,6 +201,8 @@ func main() {
 	}
 	DB.SetMaxIdleConns(256)
 
+	initialLoad()
+
 	r := mux.NewRouter()
 	r.HandleFunc("/", topHandler)
 	r.HandleFunc("/signin", signinHandler).Methods("GET", "HEAD")
@@ -193,6 +212,7 @@ func main() {
 	r.HandleFunc("/memo/{memo_id}", memoHandler).Methods("GET", "HEAD")
 	r.HandleFunc("/memo", memoPostHandler).Methods("POST")
 	r.HandleFunc("/recent/{page:[0-9]+}", recentHandler)
+	r.HandleFunc("/__reset__", resetHandler)
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./public/")))
 	http.Handle("/", r)
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
@@ -259,38 +279,26 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
+	M.lock.RLock()
+	defer M.lock.RUnlock()
+
 	user := getUser(w, r, session)
 
-	var totalCount int
-	rows, err := DB.Query("SELECT count(*) AS c FROM memos WHERE is_private=0")
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	if rows.Next() {
-		rows.Scan(&totalCount)
-	}
-	rows.Close()
+	totalCount := M.publicMemoCount
 
-	rows, err = DB.Query("SELECT * FROM memos WHERE is_private=0 ORDER BY created_at DESC, id DESC LIMIT ?", memosPerPage)
-	if err != nil {
-		serverError(w, err)
-		return
+	memos := make(Memos, 0, memosPerPage)
+	i := M.maxMemoId
+	for len(memos) < memosPerPage {
+		if i < 0 {
+			break
+		}
+		m := M.memos[i]
+		i--
+		if m == nil || m.IsPrivate != 0 {
+			continue
+		}
+		memos = append(memos, m)
 	}
-	memos := make(Memos, 0)
-	stmtUser, err := DB.Prepare("SELECT username FROM users WHERE id=?")
-	defer stmtUser.Close()
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	for rows.Next() {
-		memo := Memo{}
-		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
-		stmtUser.QueryRow(memo.User).Scan(&memo.Username)
-		memos = append(memos, &memo)
-	}
-	rows.Close()
 
 	v := &View{
 		Total:     totalCount,
@@ -302,9 +310,14 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 		Session:   session,
 		BaseUrl:   baseUrl.String(),
 	}
-	if err = tmpl.ExecuteTemplate(w, "index", v); err != nil {
+	if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
 		serverError(w, err)
 	}
+}
+
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+	initialLoad()
+	io.WriteString(w, "OK")
 }
 
 func recentHandler(w http.ResponseWriter, r *http.Request) {
@@ -572,4 +585,41 @@ func memoPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	newId, _ := result.LastInsertId()
 	http.Redirect(w, r, fmt.Sprintf("/memo/%d", newId), http.StatusFound)
+}
+
+func initialLoad() {
+	M.lock.Lock()
+	defer M.lock.Unlock()
+
+	rows, err := DB.Query("SELECT id, username, password, salt FROM users")
+	must(err)
+	for rows.Next() {
+		user := &User{}
+		rows.Scan(&user.Id, &user.Username, &user.Password, &user.Salt)
+		M.users[user.Id] = user
+	}
+	rows.Close()
+
+	pubcnt := 0
+	rows, err = DB.Query("SELECT id, user, content, is_private, created_at, updated_at FROM memos")
+	must(err)
+	for rows.Next() {
+		memo := &Memo{}
+		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
+		memo.Username = M.users[memo.User].Username
+		if memo.Id+1 >= len(M.memos) {
+			t := make([]*Memo, memo.Id*2+1)
+			copy(t, M.memos)
+			M.memos = t
+		}
+		M.memos[memo.Id] = memo
+		if memo.IsPrivate != 0 {
+			pubcnt++
+		}
+		if memo.Id > M.maxMemoId {
+			M.maxMemoId = memo.Id
+		}
+	}
+	rows.Close()
+	M.publicMemoCount = pubcnt
 }
