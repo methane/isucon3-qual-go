@@ -121,8 +121,8 @@ type View struct {
 	Total     int
 	Older     *Memo
 	Newer     *Memo
-	BaseUrl   string
 	Session   *Session
+	BaseUrl   string
 }
 
 var (
