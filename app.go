@@ -11,7 +11,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
-	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -22,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 )
 
 const (
@@ -122,15 +122,13 @@ type View struct {
 	Older     *Memo
 	Newer     *Memo
 	Session   *Session
+	BaseUrl   string
 }
 
 var (
 	DB      *sql.DB
 	baseUrl *url.URL
 	fmap    = template.FuncMap{
-		"url_for": func(path string) string {
-			return baseUrl.String() + path
-		},
 		"first_line": func(s string) string {
 			sl := strings.Split(s, "\n")
 			return sl[0]
@@ -138,7 +136,7 @@ var (
 		"get_token": func(session *Session) interface{} {
 			return session.Token
 		},
-		"gen_markdown": func(s string) template.HTML {
+		"gen_markdown": func(s string) string {
 			f, _ := ioutil.TempFile(tmpDir, "isucon")
 			defer f.Close()
 			f.WriteString(s)
@@ -152,7 +150,7 @@ var (
 				log.Printf("can't exec markdown command: %v", err)
 				return ""
 			}
-			return template.HTML(out)
+			return string(out)
 		},
 	}
 	tmpl = template.Must(template.New("tmpl").Funcs(fmap).ParseGlob("templates/*.html"))
@@ -302,6 +300,7 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 		Memos:     &memos,
 		User:      user,
 		Session:   session,
+		BaseUrl:   baseUrl.String(),
 	}
 	if err = tmpl.ExecuteTemplate(w, "index", v); err != nil {
 		serverError(w, err)
@@ -357,6 +356,7 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 		Memos:     &memos,
 		User:      user,
 		Session:   session,
+		BaseUrl:   baseUrl.String(),
 	}
 	if err = tmpl.ExecuteTemplate(w, "index", v); err != nil {
 		serverError(w, err)
@@ -371,6 +371,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 	v := &View{
 		User:    user,
 		Session: session,
+		BaseUrl: baseUrl.String(),
 	}
 	if err := tmpl.ExecuteTemplate(w, "signin", v); err != nil {
 		serverError(w, err)
@@ -412,6 +413,7 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	v := &View{
 		Session: session,
+		BaseUrl: baseUrl.String(),
 	}
 	if err := tmpl.ExecuteTemplate(w, "signin", v); err != nil {
 		serverError(w, err)
@@ -454,6 +456,7 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 		Memos:   &memos,
 		User:    user,
 		Session: session,
+		BaseUrl: baseUrl.String(),
 	}
 	if err = tmpl.ExecuteTemplate(w, "mypage", v); err != nil {
 		serverError(w, err)
@@ -533,6 +536,7 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 		Older:   older,
 		Newer:   newer,
 		Session: session,
+		BaseUrl: baseUrl.String(),
 	}
 	if err = tmpl.ExecuteTemplate(w, "memo", v); err != nil {
 		serverError(w, err)

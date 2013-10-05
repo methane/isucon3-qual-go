@@ -4,14 +4,14 @@
 <head>
 <meta http-equiv="Content-Type" content="text/html" charset="utf-8">
 <title>Isucon3</title>
-<link rel="stylesheet" href="{{ url_for "/css/bootstrap.min.css" }}">
+<link rel="stylesheet" href="{{.BaseUrl}}/css/bootstrap.min.css">
 <style>
 body {
   padding-top: 60px;
 }
 </style>
-<link rel="stylesheet" href="{{ url_for "/css/bootstrap-responsive.min.css" }}">
-<link rel="stylesheet" href="{{ url_for "/" }}">
+<link rel="stylesheet" href="{{.BaseUrl}}/css/bootstrap-responsive.min.css">
+<link rel="stylesheet" href="{{.BaseUrl}}/">
 </head>
 <body>
 <div class="navbar navbar-fixed-top">
@@ -25,9 +25,9 @@ body {
 <a class="brand" href="/">Isucon3</a>
 <div class="nav-collapse">
 <ul class="nav">
-<li><a href="{{ url_for "/" }}">Home</a></li>
+<li><a href="{{.BaseUrl}}/">Home</a></li>
 {{ if .User }}
-<li><a href="{{ url_for "/mypage" }}">MyPage</a></li>
+<li><a href="{{.BaseUrl}}/mypage">MyPage</a></li>
 <li>
   <form action="/signout" method="post">
     <input type="hidden" name="sid" value="{{ get_token .Session }}">
@@ -35,7 +35,7 @@ body {
   </form>
 </li>
 {{ else }}
-<li><a href="{{ url_for "/signin" }}">SignIn</a></li>
+<li><a href="{{.BaseUrl}}/signin">SignIn</a></li>
 {{ end }}
 </ul>
 </div> <!--/.nav-collapse -->
