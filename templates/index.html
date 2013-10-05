@@ -6,10 +6,11 @@
 <p id="pager">
   recent {{ .PageStart }} - {{ .PageEnd }} / total <span id="total">{{ .Total }}</span>
 </p>
+{{$baseUrl := .BaseUrl}}
 <ul id="memos">
 {{ range .Memos }}
 <li>
-<a href="{{.BaseUrl}}/memo/{{ .Id }}">{{ first_line .Content }}</a> by {{ .Username }} ({{ .CreatedAt }})
+<a href="{{$baseUrl}}/memo/{{ .Id }}">{{ first_line .Content }}</a> by {{ .Username }} ({{ .CreatedAt }})
 </li>
 {{ end }}
 </ul>
