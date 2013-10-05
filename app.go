@@ -414,30 +414,23 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	user := &User{}
-	rows, err := DB.Query("SELECT id, username, password, salt FROM users WHERE username=?", username)
-	if err != nil {
-		serverError(w, err)
-		return
+
+	M.lock.RLock()
+	defer M.lock.RUnlock()
+	var user *User
+	for _, user = range M.users {
+		if user != nil && user.Username == username {
+			break
+		}
 	}
-	if rows.Next() {
-		rows.Scan(&user.Id, &user.Username, &user.Password, &user.Salt)
-	}
-	rows.Close()
-	if user.Id > 0 {
-		M.users[user.Id] = user
+	if user != nil && user.Username == username {
 		h := sha256.New()
 		h.Write([]byte(user.Salt + password))
 		if user.Password == fmt.Sprintf("%x", h.Sum(nil)) {
 			session.UserId = user.Id
 			session.Token = fmt.Sprintf("%x", securecookie.GenerateRandomKey(32))
 			sessionStore.Set(w, session)
-			if _, err := DB.Exec(fmt.Sprintf("UPDATE users SET last_access=now() WHERE id=%d", user.Id)); err != nil {
-				serverError(w, err)
-				return
-			} else {
-				http.Redirect(w, r, "/mypage", http.StatusFound)
-			}
+			http.Redirect(w, r, "/mypage", http.StatusFound)
 			return
 		}
 	}
@@ -673,6 +666,11 @@ func initStaticFiles(r *mux.Router, prefix string) {
 		f.Close()
 
 		handler := func(w http.ResponseWriter, r *http.Request) {
+			if path[len(path)-4:] == ".css" {
+				w.Header().Set("Content-Type", "text/css")
+			} else if path[len(path)-3:] == ".js" {
+				w.Header().Set("Content-Type", "application/javascript")
+			}
 			w.Write(content)
 		}
 		r.HandleFunc(urlpath, handler)
