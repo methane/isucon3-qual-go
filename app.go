@@ -125,6 +125,10 @@ type View struct {
 	BaseUrl   string
 }
 
+var M = struct {
+	users = make(map[int]*User)
+}
+
 var (
 	DB      *sql.DB
 	baseUrl *url.URL
@@ -219,16 +223,7 @@ func getUser(w http.ResponseWriter, r *http.Request, session *Session) *User {
 	if userId == 0 {
 		return nil
 	}
-	user := &User{}
-	rows, err := DB.Query(fmt.Sprintf("SELECT * FROM users WHERE id=%d", userId))
-	if err != nil {
-		serverError(w, err)
-		return nil
-	}
-	if rows.Next() {
-		rows.Scan(&user.Id, &user.Username, &user.Password, &user.Salt, &user.LastAccess)
-		rows.Close()
-	}
+	user := M.users[userId]
 	if user != nil {
 		w.Header().Add("Cache-Control", "private")
 	}
@@ -257,8 +252,8 @@ func notFound(w http.ResponseWriter) {
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
 	session := sessionStore.Get(r)
-
 	prepareHandler(w, r)
+
 	user := getUser(w, r, session)
 
 	var totalCount int
@@ -396,6 +391,7 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 	if user.Id > 0 {
+		M.users[user.Id] = user
 		h := sha256.New()
 		h.Write([]byte(user.Salt + password))
 		if user.Password == fmt.Sprintf("%x", h.Sum(nil)) {
