@@ -29,10 +29,10 @@ body {
 {{ if .User }}
 <li><a href="{{.BaseUrl}}/mypage">MyPage</a></li>
 <li>
-  <form action="/signout" method="post">
-    <input type="hidden" name="sid" value="{{ get_token .Session }}">
-    <input type="submit" value="SignOut">
-  </form>
+<form action="/signout" method="post">
+<input type="hidden" name="sid" value="{{ get_token .Session }}">
+<input type="submit" value="SignOut">
+</form>
 </li>
 {{ else }}
 <li><a href="{{.BaseUrl}}/signin">SignIn</a></li>
