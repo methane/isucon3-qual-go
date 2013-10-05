@@ -2,6 +2,7 @@ package main
 
 import (
 	"./sessions"
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -11,6 +12,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
+	"github.com/knieriem/markdown"
 	"html/template"
 	"io"
 	"io/ioutil"
@@ -19,7 +21,7 @@ import (
 	_ "net/http/pprof"
 	"net/url"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +30,7 @@ import (
 
 const (
 	memosPerPage    = 100
-	listenAddr      = ":5000"
+	listenAddr      = ":80"
 	sessionName     = "isucon_session"
 	tmpDir          = "/tmp/"
 	markdownCommand = "../bin/markdown"
@@ -188,17 +190,11 @@ func (memo *Memo) Markdown() template.HTML {
 	defer memo.mlock.Unlock()
 
 	if memo.markdown == template.HTML("") {
-		cmd := exec.Command(markdownCommand)
-		pipe, err := cmd.StdinPipe()
-		go func() {
-			io.WriteString(pipe, memo.Content)
-			pipe.Close()
-		}()
-		out, err := cmd.Output()
-		if err != nil {
-			log.Panic(err)
-		}
-		memo.markdown = template.HTML(out)
+		p := markdown.NewParser(&markdown.Extensions{})
+		bo := bytes.Buffer{}
+		bi := bytes.NewBufferString(memo.Content)
+		p.Markdown(bi, markdown.ToHTML(&bo))
+		memo.markdown = template.HTML(bo.String())
 	}
 	return memo.markdown
 }
@@ -239,7 +235,7 @@ func main() {
 	r.HandleFunc("/memo", memoPostHandler).Methods("POST")
 	r.HandleFunc("/recent/{page:[0-9]+}", recentHandler)
 	r.HandleFunc("/__reset__", resetHandler)
-	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./public/")))
+	initStaticFiles(r, "public")
 	http.Handle("/", r)
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
 }
@@ -302,7 +298,7 @@ func notFound(w http.ResponseWriter) {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
@@ -352,24 +348,28 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	page, _ := strconv.Atoi(vars["page"])
 
-	rows, err := DB.Query("SELECT * FROM memos WHERE is_private=0 ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", memosPerPage, memosPerPage*page)
-	if err != nil {
-		serverError(w, err)
-		return
+	M.lock.RLock()
+	defer M.lock.RUnlock()
+
+	memos := make(Memos, 0, memosPerPage)
+	i := M.maxMemoId
+	skip := memosPerPage * page
+	for len(memos) < memosPerPage {
+		if i <= 0 {
+			break
+		}
+		m := M.memos[i]
+		i--
+		if m == nil || m.IsPrivate != 0 {
+			continue
+		}
+		if skip > 0 {
+			skip--
+			continue
+		}
+		memos = append(memos, m)
 	}
-	memos := make(Memos, 0)
-	stmtUser, err := DB.Prepare("SELECT username FROM users WHERE id=?")
-	defer stmtUser.Close()
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	for rows.Next() {
-		memo := Memo{}
-		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
-		stmtUser.QueryRow(memo.User).Scan(&memo.Username)
-		memos = append(memos, &memo)
-	}
+
 	if len(memos) == 0 {
 		notFound(w)
 		return
@@ -385,13 +385,13 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 		Session:   session,
 		BaseUrl:   baseUrl.String(),
 	}
-	if err = tmpl.ExecuteTemplate(w, "index", v); err != nil {
+	if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
 		serverError(w, err)
 	}
 }
 
 func signinHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("signin", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("signin", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	user := getUser(w, r, session)
@@ -408,7 +408,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signinPostHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("signin post", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("signin post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
@@ -452,7 +452,7 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signoutHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("signout post", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("signout post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
@@ -464,7 +464,7 @@ func signoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func mypageHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("mypage", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("mypage", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
@@ -476,16 +476,19 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	rows, err := DB.Query("SELECT id, content, is_private, created_at, updated_at FROM memos WHERE user=? ORDER BY created_at DESC", user.Id)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	memos := make(Memos, 0)
-	for rows.Next() {
-		memo := Memo{}
-		rows.Scan(&memo.Id, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
-		memos = append(memos, &memo)
+
+	memos := make(Memos, 0, memosPerPage)
+	i := M.maxMemoId
+	for len(memos) < memosPerPage {
+		if i <= 0 {
+			break
+		}
+		m := M.memos[i]
+		i--
+		if m == nil || m.User != user.Id {
+			continue
+		}
+		memos = append(memos, m)
 	}
 	v := &View{
 		Memos:   &memos,
@@ -493,13 +496,13 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 		Session: session,
 		BaseUrl: baseUrl.String(),
 	}
-	if err = tmpl.ExecuteTemplate(w, "mypage", v); err != nil {
+	if err := tmpl.ExecuteTemplate(w, "mypage", v); err != nil {
 		serverError(w, err)
 	}
 }
 
 func memoHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("memo", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("memo", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	vars := mux.Vars(r)
@@ -558,6 +561,7 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		newer = m
+		break
 	}
 
 	v := &View{
@@ -643,4 +647,36 @@ func initialLoad() {
 		addMemo(memo)
 	}
 	rows.Close()
+}
+
+func initStaticFiles(r *mux.Router, prefix string) {
+	wf := func(path string, info os.FileInfo, err error) error {
+		log.Println(path, info, err)
+		if path == prefix {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		urlpath := path[len(prefix):]
+		if urlpath[0] != '/' {
+			urlpath = "/" + urlpath
+		}
+		log.Println("Registering", urlpath, path)
+		f, err := os.Open(path)
+		if err != nil {
+			log.Println(err)
+			return nil
+		}
+		content := make([]byte, info.Size())
+		f.Read(content)
+		f.Close()
+
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			w.Write(content)
+		}
+		r.HandleFunc(urlpath, handler)
+		return nil
+	}
+	filepath.Walk(prefix, wf)
 }
