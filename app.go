@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
 	"github.com/knieriem/markdown"
+	"html"
 	"html/template"
 	"io"
 	"io/ioutil"
@@ -131,6 +132,7 @@ type Memo struct {
 	UpdatedAt string
 	Username  string
 	markdown  template.HTML
+	firstline string
 	mlock     sync.Mutex
 }
 
@@ -177,6 +179,7 @@ func addMemo(memo *Memo) {
 	if memo.Id > M.maxMemoId {
 		M.maxMemoId = memo.Id
 	}
+	memo.firstline = html.EscapeString(firstLine(memo.Content))
 }
 
 var (
@@ -307,6 +310,7 @@ func notFound(w http.ResponseWriter) {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
+	//time.Sleep(100 * time.Millisecond)
 	//defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
@@ -352,6 +356,7 @@ func resetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func recentHandler(w http.ResponseWriter, r *http.Request) {
+	//time.Sleep(100 * time.Millisecond)
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 	user := getUser(w, r, session)
@@ -395,7 +400,9 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 		Session:   session,
 		BaseUrl:   baseUrl.String(),
 	}
-	renderIndex(w, v)
+	if err := renderIndex(w, v); err != nil {
+		serverError(w, err)
+	}
 	//if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
 	//	serverError(w, err)
 	//}
@@ -468,6 +475,7 @@ func signoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func mypageHandler(w http.ResponseWriter, r *http.Request) {
+	//time.Sleep(100 * time.Millisecond)
 	//defer func(t time.Time) { log.Println("mypage", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
@@ -507,6 +515,7 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func memoHandler(w http.ResponseWriter, r *http.Request) {
+	//time.Sleep(100 * time.Millisecond)
 	//defer func(t time.Time) { log.Println("memo", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
@@ -650,6 +659,7 @@ func initialLoad() {
 		memo.Username = M.users[memo.User].Username
 		log.Println("memo:", memo.Id)
 		addMemo(memo)
+		memo.Markdown()
 	}
 	rows.Close()
 }
@@ -683,6 +693,7 @@ func initStaticFiles(r *mux.Router, prefix string) {
 			} else if path[len(path)-3:] == ".js" {
 				w.Header().Set("Content-Type", "application/javascript")
 			}
+			w.Header().Set("Content-Length", strconv.FormatInt(int64(len(content)), 10))
 			w.Write(content)
 		}
 		r.HandleFunc(urlpath, handler)
@@ -748,19 +759,24 @@ func renderBottom(w io.Writer, v *View) {
 </html>`)
 }
 
-func renderIndex(w io.Writer, v *View) {
-	renderTop(w, v)
-	fmt.Fprintf(w, `<h3>public memos</h3>
+func renderIndex(w http.ResponseWriter, v *View) error {
+	buf := &bytes.Buffer{}
+	renderTop(buf, v)
+	fmt.Fprintf(buf, `<h3>public memos</h3>
 <p id="pager">
   recent %d - %d / total <span id="total">%d</span>
 </p>
 <ul id="memos">`, v.PageStart, v.PageEnd, v.Total)
 
 	for _, memo := range v.Memos {
-		fmt.Fprintf(w, `<li><a href="%s/memo/%d">%s</a> by %s (%s)</li>`, v.BaseUrl, memo.Id, firstLine(memo.Content), memo.Username, memo.CreatedAt)
+		fmt.Fprintf(buf, `<li><a href="%s/memo/%d">%s</a> by %s (%s)</li>`,
+			v.BaseUrl, memo.Id, memo.firstline, html.EscapeString(memo.Username), memo.CreatedAt)
 	}
-	io.WriteString(w, `</ul>`)
-	renderBottom(w, v)
+	io.WriteString(buf, `</ul>`)
+	renderBottom(buf, v)
+	w.Header().Set("Content-Length", strconv.FormatInt(int64(buf.Len()), 10))
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 func renderMypage(w io.Writer, v *View) {
@@ -788,7 +804,7 @@ func renderMypage(w io.Writer, v *View) {
   %s
 </li>
 </ul>
-`, memo.Id, firstLine(memo.Content), memo.Username, memo.CreatedAt, private)
+`, memo.Id, memo.firstline, html.EscapeString(memo.Username), memo.CreatedAt, private)
 	}
 	renderBottom(w, v)
 }
