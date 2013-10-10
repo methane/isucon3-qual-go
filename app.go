@@ -130,7 +130,7 @@ type Memos []*Memo
 type View struct {
 	User      *User
 	Memo      *Memo
-	Memos     *Memos
+	Memos     Memos
 	Page      int
 	PageStart int
 	PageEnd   int
@@ -326,14 +326,15 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 		Page:      0,
 		PageStart: 1,
 		PageEnd:   memosPerPage,
-		Memos:     &memos,
+		Memos:     memos,
 		User:      user,
 		Session:   session,
 		BaseUrl:   baseUrl.String(),
 	}
-	if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
-		serverError(w, err)
-	}
+	renderIndex(w, v)
+	//if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
+	//	serverError(w, err)
+	//}
 }
 
 func resetHandler(w http.ResponseWriter, r *http.Request) {
@@ -380,14 +381,15 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 		Page:      page,
 		PageStart: memosPerPage*page + 1,
 		PageEnd:   memosPerPage * (page + 1),
-		Memos:     &memos,
+		Memos:     memos,
 		User:      user,
 		Session:   session,
 		BaseUrl:   baseUrl.String(),
 	}
-	if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
-		serverError(w, err)
-	}
+	renderIndex(w, v)
+	//if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
+	//	serverError(w, err)
+	//}
 }
 
 func signinHandler(w http.ResponseWriter, r *http.Request) {
@@ -484,7 +486,7 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 		memos = append(memos, m)
 	}
 	v := &View{
-		Memos:   &memos,
+		Memos:   memos,
 		User:    user,
 		Session: session,
 		BaseUrl: baseUrl.String(),
@@ -677,4 +679,83 @@ func initStaticFiles(r *mux.Router, prefix string) {
 		return nil
 	}
 	filepath.Walk(prefix, wf)
+}
+
+func renderTop(w io.Writer, v *View) {
+	io.WriteString(w, `<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html" charset="utf-8">
+<title>Isucon3</title>
+<link rel="stylesheet" href="/css/bootstrap.min.css">
+<style>
+body {padding-top: 60px;}
+</style>
+</head>
+<body>
+<div class="navbar navbar-fixed-top">
+<div class="navbar-inner">
+<div class="container">
+<a class="btn btn-navbar" data-toggle="collapse" data-target=".nav-collapse">
+<span class="icon-bar"></span>
+<span class="icon-bar"></span>
+<span class="icon-bar"></span>
+</a>
+<a class="brand" href="/">Isucon3</a>
+<div class="nav-collapse">
+<ul class="nav">
+<li><a href="`+v.BaseUrl+`/">Home</a></li>`)
+	if v.User != nil {
+		io.WriteString(w, `
+<li><a href="`+v.BaseUrl+`/mypage">MyPage</a></li>
+<li>
+<form action="/signout" method="post">
+<input type="hidden" name="sid" value="`+v.Session.Token+`">
+<input type="submit" value="SignOut">
+</form>
+</li>`)
+	} else {
+		fmt.Fprintf(w, `<li><a href="%s/signin">SignIn</a></li>`, v.BaseUrl)
+	}
+	io.WriteString(w, `</ul>
+</div> <!--/.nav-collapse -->
+</div></div></div>
+
+<div class="container">
+<h2>Hello `)
+	if v.User != nil {
+		io.WriteString(w, v.User.Username)
+	}
+	io.WriteString(w, "!</h2>")
+}
+
+func renderBottom(w io.Writer, v *View) {
+	io.WriteString(w, `
+</div> <!-- /container -->
+<script type="text/javascript" src="`+v.BaseUrl+`/js/jquery.min.js"></script>
+<script type="text/javascript" src="`+v.BaseUrl+`/js/bootstrap.min.js"></script>
+</body>
+</html>`)
+}
+
+func renderIndex(w io.Writer, v *View) {
+	renderTop(w, v)
+	fmt.Fprintf(w, `<h3>public memos</h3>
+<p id="pager">
+  recent %d - %d / total <span id="total">%d</span>
+</p>
+<ul id="memos">`, v.PageStart, v.PageEnd, v.Total)
+
+	for _, memo := range v.Memos {
+		pos := strings.Index(memo.Content, "\n")
+		var firstLine string
+		if pos == -1 {
+			firstLine = memo.Content
+		} else {
+			firstLine = memo.Content[:pos]
+		}
+		fmt.Fprintf(w, `<li><a href="%s/memo/%d">%s</a> by %s (%s)</li>`, v.BaseUrl, memo.Id, firstLine, memo.Username, memo.CreatedAt)
+	}
+	io.WriteString(w, `</ul>`)
+	renderBottom(w, v)
 }
