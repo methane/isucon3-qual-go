@@ -47,6 +47,15 @@ func sql_escape(s string) string {
 	return strings.Replace(s, "'", "''", -1)
 }
 
+func firstLine(s string) string {
+	pos := strings.Index(s, "\n")
+	if pos == -1 {
+		return s
+	} else {
+		return s[:pos]
+	}
+}
+
 type Config struct {
 	Database struct {
 		Dbname   string `json:"dbname"`
@@ -491,9 +500,10 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 		Session: session,
 		BaseUrl: baseUrl.String(),
 	}
-	if err := tmpl.ExecuteTemplate(w, "mypage", v); err != nil {
-		serverError(w, err)
-	}
+	renderMypage(w, v)
+	//if err := tmpl.ExecuteTemplate(w, "mypage", v); err != nil {
+	//	serverError(w, err)
+	//}
 }
 
 func memoHandler(w http.ResponseWriter, r *http.Request) {
@@ -747,15 +757,38 @@ func renderIndex(w io.Writer, v *View) {
 <ul id="memos">`, v.PageStart, v.PageEnd, v.Total)
 
 	for _, memo := range v.Memos {
-		pos := strings.Index(memo.Content, "\n")
-		var firstLine string
-		if pos == -1 {
-			firstLine = memo.Content
-		} else {
-			firstLine = memo.Content[:pos]
-		}
-		fmt.Fprintf(w, `<li><a href="%s/memo/%d">%s</a> by %s (%s)</li>`, v.BaseUrl, memo.Id, firstLine, memo.Username, memo.CreatedAt)
+		fmt.Fprintf(w, `<li><a href="%s/memo/%d">%s</a> by %s (%s)</li>`, v.BaseUrl, memo.Id, firstLine(memo.Content), memo.Username, memo.CreatedAt)
 	}
 	io.WriteString(w, `</ul>`)
+	renderBottom(w, v)
+}
+
+func renderMypage(w io.Writer, v *View) {
+	renderTop(w, v)
+	fmt.Fprintf(w, `
+<form action="/memo" method="post">
+  <input type="hidden" name="sid" value="%s">
+  <textarea name="content"></textarea>
+  <br>
+  <input type="checkbox" name="is_private" value="1"> private
+  <input type="submit" value="post">
+</form>
+
+<h3>my memos</h3>
+
+<ul>`, v.Session.Token)
+
+	for _, memo := range v.Memos {
+		private := ""
+		if memo.IsPrivate != 0 {
+			private = "[private]"
+		}
+		fmt.Fprintf(w, `<li>
+<a href="/memo/%d">%s</a> by %s (%s)
+  %s
+</li>
+</ul>
+`, memo.Id, firstLine(memo.Content), memo.Username, memo.CreatedAt, private)
+	}
 	renderBottom(w, v)
 }
