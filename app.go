@@ -152,18 +152,25 @@ type View struct {
 	BaseUrl   string
 }
 
+type PageCache struct {
+	page   string
+	expire int64
+}
+
 var M = struct {
 	lock            sync.RWMutex
 	users           map[int]*User
 	memos           []*Memo
 	publicMemoCount int
 	maxMemoId       int
+	recentPageCache map[int]PageCache
 }{
 	lock:            sync.RWMutex{},
 	users:           make(map[int]*User, 100),
 	memos:           []*Memo{},
 	publicMemoCount: 0,
 	maxMemoId:       0,
+	recentPageCache: make(map[int]PageCache),
 }
 
 func addMemo(memo *Memo) {
@@ -312,6 +319,10 @@ func notFound(w http.ResponseWriter) {
 func topHandler(w http.ResponseWriter, r *http.Request) {
 	//time.Sleep(100 * time.Millisecond)
 	//defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
+	recentPageHandler(w, r, 0)
+}
+
+func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 	session := sessionStore.Get(r)
 	prepareHandler(w, r)
 
@@ -320,34 +331,53 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 
 	user := getUser(w, r, session)
 
-	memos := make(Memos, 0, memosPerPage)
-	i := M.maxMemoId
-	for len(memos) < memosPerPage {
-		if i <= 0 {
-			break
-		}
-		m := M.memos[i]
-		i--
-		if m == nil || m.IsPrivate != 0 {
-			continue
-		}
-		memos = append(memos, m)
-	}
-
 	v := &View{
 		Total:     M.publicMemoCount,
-		Page:      0,
-		PageStart: 1,
-		PageEnd:   memosPerPage,
-		Memos:     memos,
+		Page:      page,
+		PageStart: memosPerPage*page + 1,
+		PageEnd:   memosPerPage * (page + 1),
+		Memos:     nil,
 		User:      user,
 		Session:   session,
 		BaseUrl:   baseUrl.String(),
 	}
-	renderIndex(w, v)
-	//if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
-	//	serverError(w, err)
-	//}
+
+	cache := M.recentPageCache[page]
+	if cache.expire == 0 || cache.expire < time.Now().UnixNano() {
+		memos := make(Memos, 0, memosPerPage)
+		i := M.maxMemoId
+		skip := memosPerPage * page
+		for len(memos) < memosPerPage {
+			if i <= 0 {
+				break
+			}
+			m := M.memos[i]
+			i--
+			if m == nil || m.IsPrivate != 0 {
+				continue
+			}
+			if skip > 0 {
+				skip--
+				continue
+			}
+			memos = append(memos, m)
+		}
+
+		if len(memos) == 0 {
+			notFound(w)
+			return
+		}
+		v.Memos = memos
+
+		buf := bytes.Buffer{}
+		renderIndex(&buf, v)
+		cache = PageCache{buf.String(), time.Now().Add(time.Second / 2).UnixNano()}
+		M.recentPageCache[page] = cache
+	}
+
+	renderTop(w, v)
+	io.WriteString(w, cache.page)
+	renderBottom(w, v)
 }
 
 func resetHandler(w http.ResponseWriter, r *http.Request) {
@@ -357,55 +387,9 @@ func resetHandler(w http.ResponseWriter, r *http.Request) {
 
 func recentHandler(w http.ResponseWriter, r *http.Request) {
 	//time.Sleep(100 * time.Millisecond)
-	session := sessionStore.Get(r)
-	prepareHandler(w, r)
-	user := getUser(w, r, session)
 	vars := mux.Vars(r)
 	page, _ := strconv.Atoi(vars["page"])
-
-	M.lock.RLock()
-	defer M.lock.RUnlock()
-
-	memos := make(Memos, 0, memosPerPage)
-	i := M.maxMemoId
-	skip := memosPerPage * page
-	for len(memos) < memosPerPage {
-		if i <= 0 {
-			break
-		}
-		m := M.memos[i]
-		i--
-		if m == nil || m.IsPrivate != 0 {
-			continue
-		}
-		if skip > 0 {
-			skip--
-			continue
-		}
-		memos = append(memos, m)
-	}
-
-	if len(memos) == 0 {
-		notFound(w)
-		return
-	}
-
-	v := &View{
-		Total:     M.publicMemoCount,
-		Page:      page,
-		PageStart: memosPerPage*page + 1,
-		PageEnd:   memosPerPage * (page + 1),
-		Memos:     memos,
-		User:      user,
-		Session:   session,
-		BaseUrl:   baseUrl.String(),
-	}
-	if err := renderIndex(w, v); err != nil {
-		serverError(w, err)
-	}
-	//if err := tmpl.ExecuteTemplate(w, "index", v); err != nil {
-	//	serverError(w, err)
-	//}
+	recentPageHandler(w, r, page)
 }
 
 func signinHandler(w http.ResponseWriter, r *http.Request) {
@@ -755,28 +739,28 @@ func renderBottom(w io.Writer, v *View) {
 </div> <!-- /container -->
 <script type="text/javascript" src="`+v.BaseUrl+`/js/jquery.min.js"></script>
 <script type="text/javascript" src="`+v.BaseUrl+`/js/bootstrap.min.js"></script>
-</body>
-</html>`)
+</body></html>`)
 }
 
-func renderIndex(w http.ResponseWriter, v *View) error {
-	buf := &bytes.Buffer{}
-	renderTop(buf, v)
-	fmt.Fprintf(buf, `<h3>public memos</h3>
+func renderIndex(w io.Writer, v *View) error {
+	//buf := &bytes.Buffer{}
+	//renderTop(buf, v)
+	fmt.Fprintf(w, `<h3>public memos</h3>
 <p id="pager">
   recent %d - %d / total <span id="total">%d</span>
 </p>
 <ul id="memos">`, v.PageStart, v.PageEnd, v.Total)
 
 	for _, memo := range v.Memos {
-		fmt.Fprintf(buf, `<li><a href="%s/memo/%d">%s</a> by %s (%s)</li>`,
-			v.BaseUrl, memo.Id, memo.firstline, html.EscapeString(memo.Username), memo.CreatedAt)
+		fmt.Fprintf(w, `<li><a href="/memo/%d">%s</a> by %s (%s)</li>`,
+			memo.Id, memo.firstline, html.EscapeString(memo.Username), memo.CreatedAt)
 	}
-	io.WriteString(buf, `</ul>`)
-	renderBottom(buf, v)
-	w.Header().Set("Content-Length", strconv.FormatInt(int64(buf.Len()), 10))
-	_, err := buf.WriteTo(w)
-	return err
+
+	io.WriteString(w, `</ul>`)
+	//renderBottom(buf, v)
+	//w.Header().Set("Content-Length", strconv.FormatInt(int64(buf.Len()), 10))
+	//_, err := buf.WriteTo(w)
+	return nil
 }
 
 func renderMypage(w io.Writer, v *View) {
