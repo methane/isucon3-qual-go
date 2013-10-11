@@ -83,6 +83,14 @@ var sessionStore = SessionStore{
 	sync.Mutex{},
 }
 
+var markdownConvertChan = make(chan *Memo)
+
+func markdownConverter() {
+	for memo := range markdownConvertChan {
+		memo.Markdown()
+	}
+}
+
 func (self SessionStore) Get(r *http.Request) *Session {
 	cookie, _ := r.Cookie(sessionName)
 	if cookie == nil {
@@ -241,6 +249,10 @@ func main() {
 		log.Panic(err)
 	}
 	DB.SetMaxIdleConns(256)
+
+	go markdownConverter()
+	go markdownConverter()
+	go markdownConverter()
 
 	initialLoad()
 
@@ -643,7 +655,7 @@ func initialLoad() {
 		memo.Username = M.users[memo.User].Username
 		log.Println("memo:", memo.Id)
 		addMemo(memo)
-		memo.Markdown()
+		markdownConvertChan <- memo
 	}
 	rows.Close()
 }
