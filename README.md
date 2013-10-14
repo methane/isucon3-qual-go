@@ -4,5 +4,6 @@
     $ go get github.com/gorilla/mux
     $ go get github.com/gorilla/sessions
     $ go get github.com/bradfitz/gomemcache/memcache
+    $ go get github.com/knieriem/markdown
     $ go build -o app
     $ ./app

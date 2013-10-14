@@ -30,12 +30,9 @@ import (
 )
 
 const (
-	memosPerPage    = 100
-	listenAddr      = ":80"
-	sessionName     = "isucon_session"
-	tmpDir          = "/tmp/"
-	markdownCommand = "../bin/markdown"
-	memcachedServer = "localhost:11211"
+	memosPerPage = 100
+	listenAddr   = ":80"
+	sessionName  = "isucon_session"
 )
 
 func must(err error) {
@@ -44,7 +41,7 @@ func must(err error) {
 	}
 }
 
-func sql_escape(s string) string {
+func sqlEscape(s string) string {
 	return strings.Replace(s, "'", "''", -1)
 }
 
@@ -198,9 +195,8 @@ func addMemo(memo *Memo) {
 }
 
 var (
-	DB      *sql.DB
-	baseUrl *url.URL
-	fmap    = template.FuncMap{
+	DB   *sql.DB
+	fmap = template.FuncMap{
 		"first_line": func(s string) string {
 			sl := strings.Split(s, "\n")
 			return sl[0]
@@ -287,12 +283,14 @@ func loadConfig(filename string) *Config {
 	return &config
 }
 
-func prepareHandler(w http.ResponseWriter, r *http.Request) {
+func prepareHandler(w http.ResponseWriter, r *http.Request) *url.URL {
+	var baseUrl *url.URL
 	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 		baseUrl, _ = url.Parse("http://" + h)
 	} else {
 		baseUrl, _ = url.Parse("http://" + r.Host)
 	}
+	return baseUrl
 }
 
 func getUser(w http.ResponseWriter, r *http.Request, session *Session) *User {
@@ -336,7 +334,7 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 
 func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
+	baseUrl := prepareHandler(w, r)
 
 	M.lock.RLock()
 	defer M.lock.RUnlock()
@@ -407,7 +405,7 @@ func recentHandler(w http.ResponseWriter, r *http.Request) {
 func signinHandler(w http.ResponseWriter, r *http.Request) {
 	//defer func(t time.Time) { log.Println("signin", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
+	baseUrl := prepareHandler(w, r)
 	user := getUser(w, r, session)
 
 	v := &View{
@@ -424,7 +422,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 	//defer func(t time.Time) { log.Println("signin post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
+	baseUrl := prepareHandler(w, r)
 
 	username := r.FormValue("username")
 	password := r.FormValue("password")
@@ -461,7 +459,6 @@ func signinPostHandler(w http.ResponseWriter, r *http.Request) {
 func signoutHandler(w http.ResponseWriter, r *http.Request) {
 	//defer func(t time.Time) { log.Println("signout post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
 		return
 	}
@@ -474,7 +471,7 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 	//time.Sleep(100 * time.Millisecond)
 	//defer func(t time.Time) { log.Println("mypage", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
+	baseUrl := prepareHandler(w, r)
 
 	M.lock.RLock()
 	defer M.lock.RUnlock()
@@ -514,7 +511,7 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 	//time.Sleep(100 * time.Millisecond)
 	//defer func(t time.Time) { log.Println("memo", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
+	baseUrl := prepareHandler(w, r)
 	vars := mux.Vars(r)
 	var memoId int
 	fmt.Sscanf(vars["memo_id"], "%d", &memoId)
@@ -590,7 +587,6 @@ func memoHandler(w http.ResponseWriter, r *http.Request) {
 func memoPostHandler(w http.ResponseWriter, r *http.Request) {
 	//defer func(t time.Time) { log.Println("memo post", time.Now().Sub(t)) }(time.Now())
 	session := sessionStore.Get(r)
-	prepareHandler(w, r)
 	if antiCSRF(w, r, session) {
 		return
 	}
@@ -609,7 +605,7 @@ func memoPostHandler(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Format("2006-01-02 15:04:05")
 	result, err := DB.Exec(
 		fmt.Sprintf("INSERT INTO memos (user, content, is_private, created_at) VALUES (%d, '%s', %d, '%s')",
-			user.Id, sql_escape(r.FormValue("content")), isPrivate, now))
+			user.Id, sqlEscape(r.FormValue("content")), isPrivate, now))
 	if err != nil {
 		serverError(w, err)
 		return
@@ -653,7 +649,7 @@ func initialLoad() {
 		memo := &Memo{}
 		rows.Scan(&memo.Id, &memo.User, &memo.Content, &memo.IsPrivate, &memo.CreatedAt, &memo.UpdatedAt)
 		memo.Username = M.users[memo.User].Username
-		log.Println("memo:", memo.Id)
+		//log.Println("memo:", memo.Id)
 		addMemo(memo)
 		markdownConvertChan <- memo
 	}
@@ -684,9 +680,9 @@ func initStaticFiles(r *mux.Router, prefix string) {
 		f.Close()
 
 		handler := func(w http.ResponseWriter, r *http.Request) {
-			if path[len(path)-4:] == ".css" {
+			if strings.HasSuffix(path, ".css") {
 				w.Header().Set("Content-Type", "text/css")
-			} else if path[len(path)-3:] == ".js" {
+			} else if strings.HasSuffix(path, ".js") {
 				w.Header().Set("Content-Type", "application/javascript")
 			}
 			w.Header().Set("Content-Length", strconv.FormatInt(int64(len(content)), 10))
@@ -747,10 +743,9 @@ body {padding-top: 60px;}
 }
 
 func renderBottom(w io.Writer, v *View) {
-	io.WriteString(w, `
-</div> <!-- /container -->
-<script type="text/javascript" src="`+v.BaseUrl+`/js/jquery.min.js"></script>
-<script type="text/javascript" src="`+v.BaseUrl+`/js/bootstrap.min.js"></script>
+	io.WriteString(w, `</div>
+<script type="text/javascript" src="/js/jquery.min.js"></script>
+<script type="text/javascript" src="/js/bootstrap.min.js"></script>
 </body></html>`)
 }
 
