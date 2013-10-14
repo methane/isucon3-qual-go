@@ -41,10 +41,13 @@ func must(err error) {
 	}
 }
 
+// sqlEscape escapes ' to ''.
+// This requires sql_mode=NO_BACKSLASH_ESCAPES .
 func sqlEscape(s string) string {
 	return strings.Replace(s, "'", "''", -1)
 }
 
+// Split first line from given string.
 func firstLine(s string) string {
 	pos := strings.Index(s, "\n")
 	if pos == -1 {
@@ -77,14 +80,6 @@ type SessionStore struct {
 
 var sessionStore = SessionStore{
 	store: make(map[string]*Session),
-}
-
-var markdownConvertChan = make(chan *Memo)
-
-func markdownConverter() {
-	for memo := range markdownConvertChan {
-		memo.Markdown()
-	}
 }
 
 func (self SessionStore) Get(r *http.Request) *Session {
@@ -138,6 +133,32 @@ type Memo struct {
 	markdown  template.HTML
 	firstline string
 	mlock     sync.Mutex
+}
+
+// Convert memo.Content to HTML and return it.
+func (memo *Memo) Markdown() template.HTML {
+	memo.mlock.Lock()
+	defer memo.mlock.Unlock()
+
+	if memo.markdown == template.HTML("") {
+		p := markdown.NewParser(&markdown.Extensions{})
+		bo := bytes.Buffer{}
+		bi := bytes.NewBufferString(memo.Content)
+		p.Markdown(bi, markdown.ToHTML(&bo))
+		memo.markdown = template.HTML(bo.String())
+	}
+	return memo.markdown
+}
+
+// Channel for convert markdown asynchronoushly.
+var markdownConvertChan = make(chan *Memo)
+
+// markdownConverter receives memo from markdownConvertChan
+// and convert it.
+func markdownConverter() {
+	for memo := range markdownConvertChan {
+		memo.Markdown()
+	}
 }
 
 type Memos []*Memo
@@ -206,20 +227,6 @@ var (
 	}
 	tmpl = template.Must(template.New("tmpl").Funcs(fmap).ParseGlob("templates/*.html"))
 )
-
-func (memo *Memo) Markdown() template.HTML {
-	memo.mlock.Lock()
-	defer memo.mlock.Unlock()
-
-	if memo.markdown == template.HTML("") {
-		p := markdown.NewParser(&markdown.Extensions{})
-		bo := bytes.Buffer{}
-		bi := bytes.NewBufferString(memo.Content)
-		p.Markdown(bi, markdown.ToHTML(&bo))
-		memo.markdown = template.HTML(bo.String())
-	}
-	return memo.markdown
-}
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
