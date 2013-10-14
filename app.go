@@ -161,12 +161,10 @@ func markdownConverter() {
 	}
 }
 
-type Memos []*Memo
-
 type View struct {
 	User      *User
 	Memo      *Memo
-	Memos     Memos
+	Memos     []*Memo
 	Page      int
 	PageStart int
 	PageEnd   int
@@ -360,7 +358,7 @@ func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 
 	cache := M.recentPageCache[page]
 	if cache.expire == 0 || cache.expire < time.Now().UnixNano() {
-		memos := make(Memos, 0, memosPerPage)
+		memos := make([]*Memo, 0, memosPerPage)
 		i := M.maxMemoId
 		skip := memosPerPage * page
 		for len(memos) < memosPerPage {
@@ -488,7 +486,7 @@ func mypageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	memos := make(Memos, 0, memosPerPage)
+	memos := make([]*Memo, 0, memosPerPage)
 	i := M.maxMemoId
 	for len(memos) < memosPerPage {
 		if i <= 0 {
