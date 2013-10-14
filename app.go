@@ -71,13 +71,12 @@ type Session struct {
 }
 
 type SessionStore struct {
+	sync.Mutex
 	store map[string]*Session
-	lock  sync.Mutex
 }
 
 var sessionStore = SessionStore{
-	make(map[string]*Session),
-	sync.Mutex{},
+	store: make(map[string]*Session),
 }
 
 var markdownConvertChan = make(chan *Memo)
@@ -93,10 +92,10 @@ func (self SessionStore) Get(r *http.Request) *Session {
 	if cookie == nil {
 		return &Session{}
 	}
-	self.lock.Lock()
-	defer self.lock.Unlock()
 	key := cookie.Value
+	self.Lock()
 	s := self.store[key]
+	self.Unlock()
 	if s == nil {
 		s = &Session{}
 	}
@@ -115,9 +114,9 @@ func (self SessionStore) Set(w http.ResponseWriter, sess *Session) {
 	cookie := sessions.NewCookie(sessionName, key, &sessions.Options{})
 	http.SetCookie(w, cookie)
 
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.Lock()
 	self.store[key] = sess
+	self.Unlock()
 }
 
 type User struct {
