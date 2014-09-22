@@ -254,7 +254,9 @@ func main() {
 	go markdownConverter()
 	go markdownConverter()
 
+	log.Printf("Starting initial loading.")
 	initialLoad()
+	log.Printf("Initial loading complete.")
 
 	r := mux.NewRouter()
 	r.HandleFunc("/", topHandler)
