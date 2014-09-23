@@ -41,12 +41,6 @@ func must(err error) {
 	}
 }
 
-// sqlEscape escapes ' to ''.
-// This requires sql_mode=NO_BACKSLASH_ESCAPES .
-func sqlEscape(s string) string {
-	return strings.Replace(s, "'", "''", -1)
-}
-
 // Split first line from given string.
 func firstLine(s string) string {
 	pos := strings.Index(s, "\n")
@@ -184,14 +178,14 @@ var M = struct {
 	lock            sync.RWMutex
 	users           map[int]*User
 	memos           []*Memo
-	publicMemoCount int
+	publicMemos     []*Memo
 	maxMemoId       int
 	recentPageCache map[int]PageCache
 }{
 	lock:            sync.RWMutex{},
 	users:           make(map[int]*User, 100),
 	memos:           []*Memo{},
-	publicMemoCount: 0,
+	publicMemos:     []*Memo{},
 	maxMemoId:       0,
 	recentPageCache: make(map[int]PageCache),
 }
@@ -203,7 +197,7 @@ func addMemo(memo *Memo) {
 		M.memos = t
 	}
 	if M.memos[memo.Id] == nil && memo.IsPrivate == 0 {
-		M.publicMemoCount++
+		M.publicMemos = append(M.publicMemos, memo)
 	}
 	M.memos[memo.Id] = memo
 	if memo.Id > M.maxMemoId {
@@ -226,6 +220,8 @@ var (
 	tmpl = template.Must(template.New("tmpl").Funcs(fmap).ParseGlob("templates/*.html"))
 )
 
+var insertMemoStmt *sql.Stmt
+
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
@@ -238,8 +234,8 @@ func main() {
 	config := loadConfig("../config/" + env + ".json")
 	db := config.Database
 	connectionString := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8&sql_mode=NO_BACKSLASH_ESCAPES",
-		db.Username, db.Password, db.Host, db.Port, db.Dbname,
+		"%s:%s@unix(/var/lib/mysql/mysql.sock)/%s?charset=utf8&sql_mode=NO_BACKSLASH_ESCAPES",
+		db.Username, db.Password, db.Dbname,
 	)
 	log.Printf("db: %s", connectionString)
 
@@ -250,6 +246,10 @@ func main() {
 	}
 	DB.SetMaxIdleConns(256)
 
+	insertMemoStmt, err = DB.Prepare("INSERT INTO memos (user, content, is_private, created_at) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		log.Panic(err)
+	}
 	go markdownConverter()
 	go markdownConverter()
 	go markdownConverter()
@@ -333,8 +333,6 @@ func notFound(w http.ResponseWriter) {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
-	//time.Sleep(100 * time.Millisecond)
-	//defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
 	recentPageHandler(w, r, 0)
 }
 
@@ -348,7 +346,7 @@ func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 	user := getUser(w, r, session)
 
 	v := &View{
-		Total:     M.publicMemoCount,
+		Total:     len(M.publicMemos),
 		Page:      page,
 		PageStart: memosPerPage*page + 1,
 		PageEnd:   memosPerPage * (page + 1),
@@ -360,28 +358,21 @@ func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 
 	cache := M.recentPageCache[page]
 	if cache.expire == 0 || cache.expire < time.Now().UnixNano() {
-		memos := make([]*Memo, 0, memosPerPage)
-		i := M.maxMemoId
-		skip := memosPerPage * page
-		for len(memos) < memosPerPage {
-			if i <= 0 {
-				break
-			}
-			m := M.memos[i]
-			i--
-			if m == nil || m.IsPrivate != 0 {
-				continue
-			}
-			if skip > 0 {
-				skip--
-				continue
-			}
-			memos = append(memos, m)
+		var cnt int
+		if len(M.publicMemos) > (page+1)*memosPerPage {
+			cnt = memosPerPage
+		} else {
+			cnt = len(M.publicMemos) - (page * memosPerPage)
 		}
-
-		if len(memos) == 0 {
+		if cnt == 0 {
 			notFound(w)
 			return
+		}
+
+		memos := make([]*Memo, cnt)
+		offset := len(M.publicMemos) - memosPerPage*page - 1
+		for i := 0; i < cnt; i++ {
+			memos[i] = M.publicMemos[offset-i]
 		}
 		v.Memos = memos
 
@@ -609,9 +600,7 @@ func memoPostHandler(w http.ResponseWriter, r *http.Request) {
 		isPrivate = 0
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
-	result, err := DB.Exec(
-		fmt.Sprintf("INSERT INTO memos (user, content, is_private, created_at) VALUES (%d, '%s', %d, '%s')",
-			user.Id, sqlEscape(r.FormValue("content")), isPrivate, now))
+	result, err := insertMemoStmt.Exec(user.Id, r.FormValue("content"), isPrivate, now)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -647,7 +636,7 @@ func initialLoad() {
 	rows.Close()
 
 	M.memos = []*Memo{}
-	M.publicMemoCount = 0
+	M.publicMemos = []*Memo{}
 	M.maxMemoId = 0
 	rows, err = DB.Query("SELECT id, user, content, is_private, created_at, updated_at FROM memos")
 	must(err)
