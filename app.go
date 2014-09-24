@@ -12,7 +12,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
-	"github.com/knieriem/markdown"
+	"github.com/russross/blackfriday"
 	"html"
 	"html/template"
 	"io"
@@ -135,11 +135,7 @@ func (memo *Memo) Markdown() template.HTML {
 	defer memo.mlock.Unlock()
 
 	if memo.markdown == template.HTML("") {
-		p := markdown.NewParser(&markdown.Extensions{})
-		bo := bytes.Buffer{}
-		bi := bytes.NewBufferString(memo.Content)
-		p.Markdown(bi, markdown.ToHTML(&bo))
-		memo.markdown = template.HTML(bo.String())
+		memo.markdown = template.HTML(string(blackfriday.MarkdownBasic([]byte(memo.Content))))
 	}
 	return memo.markdown
 }
@@ -154,6 +150,8 @@ func markdownConverter() {
 		memo.Markdown()
 	}
 }
+
+var anonymousHeader string
 
 type View struct {
 	User      *User
@@ -224,6 +222,14 @@ var insertMemoStmt *sql.Stmt
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	v := View{}
+	buf := bytes.Buffer{}
+	renderTop(&buf, &v)
+	anonymousHeader = buf.String()
+}
+
+func backgroundRecentCache() {
 }
 
 func main() {
@@ -270,6 +276,7 @@ func main() {
 	r.HandleFunc("/__reset__", resetHandler)
 	initStaticFiles(r, "public")
 	http.Handle("/", r)
+	go fillRecentCache()
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
 }
 
@@ -336,6 +343,53 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	recentPageHandler(w, r, 0)
 }
 
+func recentPageCache(page int) {
+	M.lock.RLock()
+	defer M.lock.RUnlock()
+
+	v := &View{
+		Total:     len(M.publicMemos),
+		Page:      page,
+		PageStart: memosPerPage*page + 1,
+		PageEnd:   memosPerPage * (page + 1),
+		Memos:     nil,
+		User:      nil,
+		Session:   nil,
+		BaseUrl:   "",
+	}
+
+	var cnt int
+	if len(M.publicMemos) > (page+1)*memosPerPage {
+		cnt = memosPerPage
+	} else {
+		cnt = len(M.publicMemos) - (page * memosPerPage)
+	}
+	if cnt == 0 {
+		return
+	}
+
+	buf := bytes.Buffer{}
+	memos := make([]*Memo, cnt)
+	offset := len(M.publicMemos) - memosPerPage*page - 1
+	for i := 0; i < cnt; i++ {
+		memos[i] = M.publicMemos[offset-i]
+	}
+	v.Memos = memos
+
+	renderIndex(&buf, v)
+	M.recentPageCache[page] = PageCache{buf.String(), time.Now().Add(time.Second).UnixNano()}
+}
+
+func fillRecentCache() {
+	for {
+		pages := (len(M.publicMemos) + (memosPerPage - 1)) / memosPerPage
+		for i := 0; i < pages; i++ {
+			recentPageCache(i)
+		}
+		time.Sleep(time.Second / 2)
+	}
+}
+
 func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 	session := sessionStore.Get(r)
 	baseUrl := prepareHandler(w, r)
@@ -357,34 +411,16 @@ func recentPageHandler(w http.ResponseWriter, r *http.Request, page int) {
 	}
 
 	cache := M.recentPageCache[page]
-	if cache.expire == 0 || cache.expire < time.Now().UnixNano() {
-		var cnt int
-		if len(M.publicMemos) > (page+1)*memosPerPage {
-			cnt = memosPerPage
-		} else {
-			cnt = len(M.publicMemos) - (page * memosPerPage)
-		}
-		if cnt == 0 {
-			notFound(w)
-			return
-		}
-
-		memos := make([]*Memo, cnt)
-		offset := len(M.publicMemos) - memosPerPage*page - 1
-		for i := 0; i < cnt; i++ {
-			memos[i] = M.publicMemos[offset-i]
-		}
-		v.Memos = memos
-
-		buf := bytes.Buffer{}
-		renderIndex(&buf, v)
-		cache = PageCache{buf.String(), time.Now().Add(time.Second / 2).UnixNano()}
-		M.recentPageCache[page] = cache
+	buf := bytes.Buffer{}
+	if user == nil {
+		buf.WriteString(anonymousHeader)
+	} else {
+		renderTop(&buf, v)
 	}
-
-	renderTop(w, v)
-	io.WriteString(w, cache.page)
-	renderBottom(w, v)
+	buf.WriteString(cache.page)
+	renderBottom(&buf, v)
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	io.Copy(w, &buf)
 }
 
 func resetHandler(w http.ResponseWriter, r *http.Request) {
@@ -690,6 +726,10 @@ func initStaticFiles(r *mux.Router, prefix string) {
 }
 
 func renderTop(w io.Writer, v *View) {
+	if v.User == nil && anonymousHeader != "" {
+		io.WriteString(w, anonymousHeader)
+		return
+	}
 	io.WriteString(w, `<!DOCTYPE html>
 <html>
 <head>
